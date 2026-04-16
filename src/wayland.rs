@@ -305,7 +305,16 @@ impl AppState {
 // ---- icon loading ----
 
 fn load_icon(app_icon: &str, app_name: &str) -> Option<Vec<u8>> {
-    let path = find_icon_path(app_icon, app_name)?;
+    let path = find_icon_path(app_icon, app_name);
+    let path = match path {
+        Some(p) => p,
+        None => {
+            if !app_name.is_empty() || !app_icon.is_empty() {
+                tracing::warn!(app_icon = %app_icon, app_name = %app_name, "icon not found");
+            }
+            return None;
+        }
+    };
     let size = ICON_LOGICAL * SCALE as u32;
     match image::open(&path) {
         Ok(img) => {
@@ -313,7 +322,7 @@ fn load_icon(app_icon: &str, app_name: &str) -> Option<Vec<u8>> {
             Some(resized.to_rgba8().into_raw())
         }
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "failed to load icon");
+            tracing::warn!(path = %path.display(), error = %e, "failed to decode icon");
             None
         }
     }
@@ -330,12 +339,14 @@ fn find_icon_path(app_icon: &str, app_name: &str) -> Option<PathBuf> {
 
     let name = if !app_icon.is_empty() && !app_icon.starts_with('/') {
         app_icon
-    } else {
+    } else if !app_name.is_empty() {
         app_name
+    } else {
+        return None;
     };
     let lower = name.to_lowercase();
 
-    // 2. hicolor theme
+    // 2. hicolor theme — exact name
     for size in &["256x256", "128x128", "64x64", "48x48", "32x32"] {
         let p = PathBuf::from(format!("/usr/share/icons/hicolor/{size}/apps/{lower}.png"));
         if p.exists() {
@@ -343,26 +354,44 @@ fn find_icon_path(app_icon: &str, app_name: &str) -> Option<PathBuf> {
         }
     }
 
-    // 3. pixmaps
+    // 3. hicolor theme — search for icons containing the name (e.g. com.mitchellh.ghostty)
+    for size in &["256x256", "128x128", "64x64", "48x48"] {
+        let dir = format!("/usr/share/icons/hicolor/{size}/apps");
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy().to_lowercase();
+                if fname_str.contains(&lower) && fname_str.ends_with(".png") {
+                    return Some(entry.path());
+                }
+            }
+        }
+    }
+
+    // 4. pixmaps
     let p = PathBuf::from(format!("/usr/share/pixmaps/{lower}.png"));
     if p.exists() {
         return Some(p);
     }
 
-    // 4. /opt/{name}/{name}.png (Electron apps)
+    // 5. /opt/{name}/{name}.png (Electron apps)
     let p = PathBuf::from(format!("/opt/{lower}/{lower}.png"));
     if p.exists() {
         return Some(p);
     }
 
-    // 5. Desktop entry lookup
-    let desktop = format!("/usr/share/applications/{lower}.desktop");
-    if let Ok(content) = std::fs::read_to_string(&desktop) {
-        for line in content.lines() {
-            if let Some(icon_name) = line.strip_prefix("Icon=") {
-                let icon_name = icon_name.trim();
-                if icon_name != name {
-                    return find_icon_path(icon_name, "");
+    // 6. Desktop entry lookup
+    for pattern in &[
+        format!("/usr/share/applications/{lower}.desktop"),
+        format!("/usr/share/applications/{lower}-desktop.desktop"),
+    ] {
+        if let Ok(content) = std::fs::read_to_string(pattern) {
+            for line in content.lines() {
+                if let Some(icon_name) = line.strip_prefix("Icon=") {
+                    let icon_name = icon_name.trim();
+                    if icon_name != name {
+                        return find_icon_path(icon_name, "");
+                    }
                 }
             }
         }
