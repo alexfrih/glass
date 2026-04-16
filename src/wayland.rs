@@ -65,6 +65,7 @@ const MARGIN_TOP: i32 = 14;
 const MARGIN_RIGHT: i32 = 14;
 const SCALE: i32 = 2;
 const ICON_LOGICAL: u32 = 18;
+const STACK_GAP: i32 = 8;
 
 // ---- state ----
 
@@ -90,6 +91,7 @@ struct AppState {
     seat: SeatState,
     blur_manager: org_kde_kwin_blur_manager::OrgKdeKwinBlurManager,
     slots: HashMap<u32, Slot>,
+    order: Vec<u32>, // stack order, oldest first
     reply_tx: UnboundedSender<Reply>,
     hovered_surface: Option<wayland_client::protocol::wl_surface::WlSurface>,
 }
@@ -118,6 +120,7 @@ pub fn run(mut rx: UnboundedReceiver<Event>, reply_tx: UnboundedSender<Reply>) -
         seat,
         blur_manager,
         slots: HashMap::new(),
+        order: Vec::new(),
         reply_tx,
         hovered_surface: None,
     };
@@ -184,6 +187,11 @@ impl AppState {
     ) {
         self.close(id, 0); // silent close if replacing
 
+        // Position in stack — new notifications go to the bottom of the stack
+        // (newest at top is also a valid choice; here we keep oldest-at-top)
+        let stack_index = self.order.len() as i32;
+        let margin_top = MARGIN_TOP + stack_index * (HEIGHT as i32 + STACK_GAP);
+
         let surface = self.compositor.create_surface(qh);
         let layer = self.layer_shell.create_layer_surface(
             qh,
@@ -193,7 +201,7 @@ impl AppState {
             None,
         );
         layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
-        layer.set_margin(MARGIN_TOP, MARGIN_RIGHT, 0, 0);
+        layer.set_margin(margin_top, MARGIN_RIGHT, 0, 0);
         layer.set_size(WIDTH, HEIGHT);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.commit();
@@ -229,15 +237,30 @@ impl AppState {
                 icon_rgba,
             },
         );
+        self.order.push(id);
+    }
+
+    fn relayout(&mut self) {
+        let ids: Vec<u32> = self.order.clone();
+        for (i, id) in ids.iter().enumerate() {
+            let margin_top = MARGIN_TOP + i as i32 * (HEIGHT as i32 + STACK_GAP);
+            if let Some(slot) = self.slots.get_mut(id) {
+                slot.surface.set_margin(margin_top, MARGIN_RIGHT, 0, 0);
+                slot.surface.commit();
+            }
+        }
     }
 
     fn close(&mut self, id: u32, reason: u32) {
         if let Some(slot) = self.slots.remove(&id) {
             slot.blur.release();
             drop(slot);
+            self.order.retain(|&x| x != id);
             if reason > 0 {
                 let _ = self.reply_tx.send(Reply::Closed { id, reason });
             }
+            // Shift remaining notifications up
+            self.relayout();
         }
     }
 
